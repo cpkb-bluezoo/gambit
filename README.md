@@ -7,36 +7,36 @@ A generic PDF parser with good performance based on NIO and a SAX/Expat-like han
 - **NIO-based I/O**  
   The parser reads from a `SeekableByteChannel` (e.g. `FileChannel`) using `ByteBuffer` and buffered reads. This supports local files and remote resources (e.g. HTTP byte ranges for linearized PDFs) without loading the whole file into memory.
 
-- **Event-driven, handler-based API**  
-  Parsing is push-based: as the parser recognises PDF constructs, it invokes callbacks on a `PDFHandler`. There is no built-in DOM; the application reacts to events and can stream or discard data as needed (SAX/Expat style).
+- **Event-driven, memory-efficient**  
+  The goal is to avoid building in-memory object trees where possible. The API is event-driven: the parser delivers **structured events** (typed callbacks) to handlers; there is no built-in DOM. The application can stream or discard data as it goes (SAX/Expat style) and only materialise the state it needs.
 
 - **Structured events**  
   Events are typed and semantic: `startObject`/`endObject`, `startDictionary`/`key`/`endDictionary`, `startArray`/`endArray`, `booleanValue`, `numberValue`, `stringValue`, `nameValue`, `objectReference`, `startStream`/`streamContent`/`endStream`, etc. A `PDFLocator` (SAX-style) provides byte offsets for diagnostics and positioning.
 
 ## Usage
 
-**Push style** (SAX-like): the parser loads the document and traverses from the catalog, firing events for every referenced object in discovery order.
+Two styles of use are supported:
+
+**Push style** — `parse(channel)` loads the document and traverses from the catalog, firing events for every referenced object in discovery order. This is the most efficient way to build object-model state in one pass (e.g. in-memory structures representing the document) if that is what the application needs. The application still controls what it builds from the events; the parser does not allocate a document tree.
+
+**Pull style** — `load(channel)` loads only the cross-reference and trailer. The application then requests specific objects via `parseObject(id, handler)`. This enables selective parsing: only the catalog, only certain pages, only a given content stream or font, etc. Handlers receive events for the requested object; references inside it are reported as `objectReference(id)`, and the application (or handler) can call `parseObject(refId, nextHandler)` for the refs it cares about. A clearer **handler registration mechanism** (e.g. registering callbacks by object or stream type) is planned so that the application can register handlers once and drive parsing by object ID or key, rather than passing a handler into every `parseObject` call.
 
 ```java
+// Push: full traversal, e.g. to build document state
 PDFHandler handler = new MyPDFHandler();
 PDFParser parser = new PDFParser(handler);
-
 try (FileChannel channel = FileChannel.open(Paths.get("document.pdf"))) {
     parser.parse(channel);
 }
-```
 
-**Pull style**: load the xref and trailer only, then request only the objects you need. Handlers can decide which references to follow (e.g. a catalog handler asks for the Pages object; a Pages handler asks for each Page).
-
-```java
-PDFParser parser = new PDFParser(noOpHandler);  // or a handler that logs refs
-
+// Pull: load then request only what you need
+PDFParser parser = new PDFParser(noOpHandler);
 try (FileChannel channel = FileChannel.open(Paths.get("document.pdf"))) {
     parser.load(channel);
     ObjectId catalogId = parser.getCatalogId();
-    parser.parseObject(catalogId, catalogHandler);  // catalogHandler sees /Pages 3 0 R
-    // catalogHandler then calls parser.parseObject(pagesId, pagesHandler);
-    // pagesHandler sees /Kids [2 0 R] and calls parser.parseObject(2 0 R, pageHandler); etc.
+    parser.parseObject(catalogId, catalogHandler);
+    // catalogHandler sees /Pages 3 0 R and calls parser.parseObject(pagesId, pagesHandler);
+    // pagesHandler sees /Kids and calls parser.parseObject(pageId, pageHandler) per page; etc.
 }
 ```
 
