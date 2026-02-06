@@ -34,6 +34,11 @@
   <property name='java.source.version' value='1.8'/>
   <property name='java.target.version' value='1.8'/>
   
+  <!-- Optional dependency (e.g. Gonzalez for XML/XMP); add JAR to lib/ -->
+  <path id='optional.lib.path'>
+    <fileset dir='lib' includes='*.jar' erroronmissingdir='false'/>
+  </path>
+
   <!-- JUnit dependencies -->
   <property name='junit.jar' value='junit-4.13.1.jar'/>
   <property name='hamcrest.jar' value='hamcrest-3.0.jar'/>
@@ -56,10 +61,11 @@
     <javac srcdir='${src}' destdir='${build}' debug='true' includeantruntime='false'
            source='${java.source.version}' target='${java.target.version}'>
       <include name='**/*.java'/>
+      <classpath refid='optional.lib.path'/>
     </javac>
   </target>
 
-  <!-- Create JAR file -->
+  <!-- Create JAR file (optional libs are not bundled; use a classpath when running) -->
   <target name='jar' depends='build'>
     <mkdir dir='${dist}'/>
     <jar destfile='${gambit.jar}' basedir='${build}'>

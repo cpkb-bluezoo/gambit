@@ -1,3 +1,23 @@
+/*
+ * PDFContentParser.java
+ * Copyright (C) 2025 Chris Burdess
+ *
+ * This file is part of Gambit, a streaming PDF parser.
+ *
+ * Gambit is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Gambit is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Gambit.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
 package org.bluezoo.gambit;
 
 import java.io.IOException;
@@ -625,7 +645,9 @@ public class PDFContentParser implements StreamParser {
     }
 
     private Object readInlineImageValue(ByteBuffer buffer) {
-        if (!buffer.hasRemaining()) return null;
+        if (!buffer.hasRemaining()) {
+            return null;
+        }
         int b = peek(buffer);
         
         if (b == '/') {
@@ -790,7 +812,9 @@ public class PDFContentParser implements StreamParser {
     }
 
     private Number readNumber(ByteBuffer buffer) {
-        if (!buffer.hasRemaining()) return null;
+        if (!buffer.hasRemaining()) {
+            return null;
+        }
         
         StringBuilder sb = new StringBuilder();
         boolean isReal = false;
@@ -829,7 +853,9 @@ public class PDFContentParser implements StreamParser {
     }
 
     private String readKeyword(ByteBuffer buffer) {
-        if (!buffer.hasRemaining()) return null;
+        if (!buffer.hasRemaining()) {
+            return null;
+        }
         
         StringBuilder sb = new StringBuilder();
         

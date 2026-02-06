@@ -255,8 +255,12 @@ public class FlateDecodeFilter extends StreamFilter {
         int pa = Math.abs(p - a);
         int pb = Math.abs(p - b);
         int pc = Math.abs(p - c);
-        if (pa <= pb && pa <= pc) return a;
-        if (pb <= pc) return b;
+        if (pa <= pb && pa <= pc) {
+            return a;
+        }
+        if (pb <= pc) {
+            return b;
+        }
         return c;
     }
 

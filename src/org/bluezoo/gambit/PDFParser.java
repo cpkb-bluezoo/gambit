@@ -74,6 +74,7 @@ public class PDFParser {
     private final PDFHandler handler;
     private PDFContentHandler contentHandler;
     private OpenTypeHandler openTypeHandler;
+    private CMapHandler cmapHandler;
     
     private SeekableByteChannel channel;
     private ByteBuffer buffer;
@@ -98,6 +99,9 @@ public class PDFParser {
     private Name currentObjectType;  // /Type value of current object being parsed
     private Name currentKey;         // Current dictionary key being processed
     private StreamType currentStreamType;  // Stream type for current object
+
+    // Object stream cache (PDF 1.5+): stream ID -> decoded stream with index
+    private Map<ObjectId, ObjectStream> objectStreamCache;
 
     /**
      * Creates a new PDF parser with the specified handler.
@@ -143,35 +147,129 @@ public class PDFParser {
     }
 
     /**
-     * Parses a PDF document from the specified channel.
+     * Loads the PDF document structure (cross-reference table and trailer) from
+     * the channel without parsing the body. Use this for pull-style parsing:
+     * after {@code load(channel)} call {@link #getCatalogId()} (or read
+     * {@link #getTrailer()}) and then {@link #parseObject(ObjectId, PDFHandler)}
+     * for each object the application cares about.
      * <p>
-     * The channel must support seeking to allow random access to PDF
-     * structures such as the cross-reference table and indirect objects.
+     * The same channel can later be used for {@link #parse(SeekableByteChannel)}
+     * to do a full push-style parse, or the application can drive entirely via
+     * {@code parseObject}.
+     *
+     * @param channel the channel to read from
+     * @throws IOException if an I/O error occurs
+     * @throws PDFParseException if the PDF is malformed
+     */
+    public void load(SeekableByteChannel channel) throws IOException {
+        this.channel = channel;
+        this.buffer = ByteBuffer.allocate(BUFFER_SIZE);
+        this.xref = new CrossReferenceTable();
+        this.trailer = null;
+        this.objectStreamCache = new HashMap<>();
+        this.pendingReferences = new HashMap<>();
+        
+        long startxrefOffset = findStartxref();
+        long xrefOffset = readStartxrefValue(startxrefOffset);
+        loadXref(xrefOffset);
+    }
+
+    /**
+     * Returns the document catalog object ID (from the trailer /Root entry).
+     * Use after {@link #load(SeekableByteChannel)} to pull the catalog, then
+     * pass the result to {@link #parseObject(ObjectId, PDFHandler)} with a
+     * handler that understands catalog structure (e.g. to read /Pages).
+     *
+     * @return the catalog object ID
+     * @throws IllegalStateException if the document has not been loaded
+     * @throws PDFParseException if the trailer has no /Root
+     */
+    public ObjectId getCatalogId() {
+        if (trailer == null) {
+            throw new IllegalStateException("Document not loaded; call load(channel) first");
+        }
+        Object root = trailer.get(new Name("Root"));
+        if (!(root instanceof ObjectId)) {
+            throw new PDFParseException("Trailer missing /Root entry");
+        }
+        return (ObjectId) root;
+    }
+
+    /**
+     * Parses a single indirect object and delivers its events to the given handler.
+     * Use after {@link #load(SeekableByteChannel)} to pull only the objects the
+     * application needs. References inside the object are reported as
+     * {@link PDFHandler#objectReference(ObjectId)}; the application can call
+     * {@code parseObject} again for any of those IDs to pull nested objects.
      * <p>
-     * Parsing starts from the document root (Catalog) and traverses
-     * the document structure by following object references.
+     * Example: load the catalog, then ask for the Pages object when the catalog
+     * handler sees the /Pages key, then ask for each Page when the Pages handler
+     * sees /Kids entries.
+     *
+     * @param id the object ID to parse (e.g. from getCatalogId() or from a
+     *        previous objectReference callback)
+     * @param targetHandler the handler to receive events for this object
+     * @throws IllegalStateException if the document has not been loaded
+     * @throws IOException if an I/O error occurs
+     * @throws PDFParseException if the object is missing or malformed
+     */
+    public void parseObject(ObjectId id, PDFHandler targetHandler) throws IOException {
+        if (channel == null || xref == null) {
+            throw new IllegalStateException("Document not loaded; call load(channel) first");
+        }
+        CrossReferenceEntry entry = xref.get(id);
+        if (entry == null) {
+            throw new PDFParseException("Object not in cross-reference: " + id);
+        }
+        if (entry.isFree()) {
+            throw new PDFParseException("Object is free (deleted): " + id);
+        }
+        
+        PDFHandler savedActive = activeHandler;
+        StreamType savedStreamType = currentStreamType;
+        Name savedObjectType = currentObjectType;
+        Name savedKey = currentKey;
+        
+        try {
+            currentStreamType = StreamType.DEFAULT;
+            currentObjectType = null;
+            currentKey = null;
+            
+            if (entry.isInUse()) {
+                parseIndirectObject(id, targetHandler);
+            } else if (entry.isCompressed()) {
+                ObjectId streamId = new ObjectId(entry.getObjectStreamNumber(), 0);
+                ObjectStream objStream = getOrLoadObjectStream(streamId);
+                int offset = objStream.getObjectStartOffset(entry.getIndexInStream());
+                targetHandler.startObject(id);
+                parseObjectFromBuffer(objStream.getDecoded(), offset);
+                targetHandler.endObject();
+            }
+        } finally {
+            activeHandler = savedActive;
+            currentStreamType = savedStreamType;
+            currentObjectType = savedObjectType;
+            currentKey = savedKey;
+        }
+    }
+
+    /**
+     * Parses a PDF document from the specified channel (push style).
+     * <p>
+     * The channel must support seeking. This method loads the cross-reference
+     * and trailer, then traverses from the document catalog and fires events
+     * for every referenced object in discovery order. For pull-style control
+     * (request only the objects you need), use {@link #load(SeekableByteChannel)}
+     * and {@link #parseObject(ObjectId, PDFHandler)} instead.
      *
      * @param channel the channel to read from
      * @throws IOException if an I/O error occurs
      * @throws PDFParseException if the PDF is malformed
      */
     public void parse(SeekableByteChannel channel) throws IOException {
-        this.channel = channel;
-        this.buffer = ByteBuffer.allocate(BUFFER_SIZE);
-        this.xref = new CrossReferenceTable();
-        this.trailer = null;
+        load(channel);
         this.visitedObjects = new HashSet<>();
         this.objectQueue = new ArrayDeque<>();
-        this.pendingReferences = new HashMap<>();
-        
-        // Find startxref at end of file
-        long startxrefOffset = findStartxref();
-        
-        // Read the xref offset value
-        long xrefOffset = readStartxrefValue(startxrefOffset);
-        
-        // Load the cross-reference table (handles incremental updates)
-        loadXref(xrefOffset);
         
         // First, emit the root dictionary as an object
         // (0 0 R for traditional xref, actual ID for XRef stream)
@@ -215,14 +313,33 @@ public class PDFParser {
                 
                 parseIndirectObject(id);
                 
-                // Queue any new references found during parsing
+                for (Map.Entry<ObjectId, StreamType> pending : pendingReferences.entrySet()) {
+                    if (!visitedObjects.contains(pending.getKey())) {
+                        objectQueue.add(new ObjectReference(pending.getKey(), pending.getValue()));
+                    }
+                }
+            } else if (entry.isCompressed()) {
+                visitedObjects.add(id);
+                pendingReferences.clear();
+                currentStreamType = ref.getStreamType();
+                currentObjectType = null;
+                currentKey = null;
+                
+                ObjectId streamId = new ObjectId(entry.getObjectStreamNumber(), 0);
+                ObjectStream objStream = getOrLoadObjectStream(streamId);
+                int index = entry.getIndexInStream();
+                int offset = objStream.getObjectStartOffset(index);
+                
+                handler.startObject(id);
+                parseObjectFromBuffer(objStream.getDecoded(), offset);
+                handler.endObject();
+                
                 for (Map.Entry<ObjectId, StreamType> pending : pendingReferences.entrySet()) {
                     if (!visitedObjects.contains(pending.getKey())) {
                         objectQueue.add(new ObjectReference(pending.getKey(), pending.getValue()));
                     }
                 }
             }
-            // TODO: Handle compressed objects (in object streams)
         }
     }
 
@@ -675,6 +792,18 @@ public class PDFParser {
      * @throws IOException if an I/O error occurs
      */
     void parseIndirectObject(ObjectId id) throws IOException {
+        parseIndirectObject(id, null);
+    }
+
+    /**
+     * Parses an indirect object and fires events to the given handler (or the
+     * default handler when objectHandler is null). Used for both push and pull parsing.
+     *
+     * @param id the object identifier
+     * @param objectHandler handler for this object's events, or null to use the default handler
+     * @throws IOException if an I/O error occurs
+     */
+    void parseIndirectObject(ObjectId id, PDFHandler objectHandler) throws IOException {
         CrossReferenceEntry entry = xref.get(id);
         if (entry == null || !entry.isInUse()) {
             throw new PDFParseException("Object not found: " + id);
@@ -703,7 +832,7 @@ public class PDFParser {
         activeHandler = xrefHandler;
         parseObject();
         Object capturedValue = xrefHandler.getResult();
-        activeHandler = handler;
+        activeHandler = (objectHandler != null) ? objectHandler : handler;
         
         skipWhitespace();
         
@@ -714,10 +843,13 @@ public class PDFParser {
             @SuppressWarnings("unchecked")
             Map<Name, Object> dict = (Map<Name, Object>) capturedValue;
             
-            // Extract /Type for context tracking
+            // Extract /Type for context tracking and object stream detection
             Object typeObj = dict.get(new Name("Type"));
             if (typeObj instanceof Name) {
                 currentObjectType = (Name) typeObj;
+                if ("ObjStm".equals(((Name) typeObj).getValue())) {
+                    currentStreamType = StreamType.OBJECT_STREAM;
+                }
             }
             
             if (hasStream) {
@@ -731,8 +863,8 @@ public class PDFParser {
             }
         }
         
-        // Now fire events to user handler
-        handler.startObject(id);
+        PDFHandler eventTarget = (objectHandler != null) ? objectHandler : handler;
+        eventTarget.startObject(id);
         
         // Re-parse from content start to fire events
         seek(contentStart);
@@ -743,7 +875,7 @@ public class PDFParser {
         if (hasStream && capturedValue instanceof Map) {
             @SuppressWarnings("unchecked")
             Map<Name, Object> streamDict = (Map<Name, Object>) capturedValue;
-            parseStream(streamLength, streamDict);
+            parseStream(streamLength, streamDict, id);
         }
         
         // Expect 'endobj'
@@ -752,30 +884,47 @@ public class PDFParser {
             throw new PDFParseException("Expected 'endobj'", getPosition());
         }
         
-        handler.endObject();
+        eventTarget.endObject();
     }
 
     /**
      * Resolves an indirect reference to get a Length value.
+     * Supports both in-use (file offset) and compressed (object stream) references.
      */
     private int resolveLength(ObjectId lengthId) throws IOException {
         CrossReferenceEntry entry = xref.get(lengthId);
-        if (entry == null || !entry.isInUse()) {
+        if (entry == null) {
+            throw new PDFParseException("Length object not found: " + lengthId);
+        }
+        if (entry.isCompressed()) {
+            ObjectId streamId = new ObjectId(entry.getObjectStreamNumber(), 0);
+            ObjectStream objStream = getOrLoadObjectStream(streamId);
+            int offset = objStream.getObjectStartOffset(entry.getIndexInStream());
+            PDFHandler savedHandler = activeHandler;
+            activeHandler = xrefHandler;
+            xrefHandler.reset();
+            parseObjectFromBuffer(objStream.getDecoded(), offset);
+            Object result = xrefHandler.getResult();
+            activeHandler = savedHandler;
+            if (!(result instanceof Number)) {
+                throw new PDFParseException("Length object is not a number: " + lengthId);
+            }
+            return ((Number) result).intValue();
+        }
+        if (!entry.isInUse()) {
             throw new PDFParseException("Length object not found: " + lengthId);
         }
         
         long savedPos = getPosition();
         seek(entry.getOffset());
         
-        // Skip object header
-        readLong(); // objNum
+        readLong();
         skipWhitespace();
-        readLong(); // genNum
+        readLong();
         skipWhitespace();
         skipKeyword(OBJ);
         skipWhitespace();
         
-        // Read the number
         Number length = readNumber();
         
         seek(savedPos);
@@ -784,10 +933,13 @@ public class PDFParser {
 
     /**
      * Parses a stream and fires stream events.
+     * For object streams (/Type /ObjStm), also caches the decoded stream and index for compressed object resolution.
      *
      * @param length the stream length in bytes
+     * @param streamDict the stream dictionary
+     * @param objectId the indirect object ID of this stream (for object stream cache)
      */
-    private void parseStream(int length, Map<Name, Object> streamDict) throws IOException {
+    private void parseStream(int length, Map<Name, Object> streamDict, ObjectId objectId) throws IOException {
         if (!skipKeyword(STREAM)) {
             return;
         }
@@ -803,24 +955,24 @@ public class PDFParser {
         activeHandler.startStream();
         
         // Build the filter pipeline
-        // The dispatcher sends decoded data to handler.streamContent() and optionally a specialized parser
         StreamDispatcher dispatcher = new StreamDispatcher(activeHandler);
-        
-        // Set up specialized stream parser based on stream type
         StreamParser streamParser = createStreamParser(currentStreamType);
         if (streamParser != null) {
             dispatcher.setParser(streamParser);
         }
         
-        // Create the filter pipeline (filters -> dispatcher)
-        FilterPipeline pipeline = FilterPipeline.create(streamDict, dispatcher);
+        StreamConsumer pipelineConsumer = dispatcher;
+        ByteBufferCollector objectStreamCollector = null;
+        if (isObjectStream(streamDict)) {
+            objectStreamCollector = new ByteBufferCollector();
+            pipelineConsumer = new TeeConsumer(objectStreamCollector, dispatcher);
+        }
         
-        // Read and push stream content through the pipeline
+        FilterPipeline pipeline = FilterPipeline.create(streamDict, pipelineConsumer);
+        
         if (length > 0) {
-            // Read in chunks for memory efficiency
             int chunkSize = 8192;
             int remaining = length;
-            
             while (remaining > 0) {
                 int toRead = Math.min(chunkSize, remaining);
                 byte[] chunk = readBytes(toRead);
@@ -829,14 +981,224 @@ public class PDFParser {
             }
         }
         
-        // Signal end of stream to flush buffers
         pipeline.close();
-        
         activeHandler.endStream();
+        
+        if (objectStreamCollector != null) {
+            ByteBuffer decoded = objectStreamCollector.toByteBuffer();
+            Number nObj = (Number) streamDict.get(new Name("N"));
+            Number firstObj = (Number) streamDict.get(new Name("First"));
+            if (nObj != null && firstObj != null) {
+                int n = nObj.intValue();
+                int first = firstObj.intValue();
+                int[] relativeOffsets = parseObjectStreamIndex(decoded, n, first);
+                ObjectStream objStream = new ObjectStream(objectId, decoded, first, relativeOffsets);
+                objectStreamCache.put(objectId, objStream);
+            }
+        }
         
         skipWhitespace();
         skipKeyword(ENDSTREAM);
     }
+
+    /**
+     * Returns true if the stream dictionary indicates an object stream (/Type /ObjStm).
+     */
+    private static boolean isObjectStream(Map<Name, Object> streamDict) {
+        Object type = streamDict != null ? streamDict.get(new Name("Type")) : null;
+        return type instanceof Name && "ObjStm".equals(((Name) type).getValue());
+    }
+
+    /**
+     * Parses the index table of an object stream. The first {@code first} bytes of
+     * {@code decoded} contain N pairs of (object number, relative offset). Returns
+     * the relative offsets for each object (offsets relative to /First).
+     *
+     * @param decoded decoded stream buffer (read from position 0; limit may be &gt; first)
+     * @param n number of objects
+     * @param first byte length of the index table
+     * @return array of relative offsets, length n
+     */
+    private static int[] parseObjectStreamIndex(ByteBuffer decoded, int n, int first) {
+        int[] relativeOffsets = new int[n];
+        ByteBuffer slice = decoded.duplicate();
+        slice.limit(Math.min(first, slice.limit()));
+        for (int i = 0; i < n; i++) {
+            skipPdfWhitespace(slice);
+            readPdfInteger(slice); // object number
+            skipPdfWhitespace(slice);
+            relativeOffsets[i] = (int) readPdfInteger(slice);
+        }
+        return relativeOffsets;
+    }
+
+    private static void skipPdfWhitespace(ByteBuffer buf) {
+        while (buf.hasRemaining()) {
+            byte b = buf.get();
+            if (b != 0 && b != 9 && b != 10 && b != 12 && b != 13 && b != 32 && b != '%') {
+                buf.position(buf.position() - 1);
+                return;
+            }
+            if (b == '%') {
+                while (buf.hasRemaining() && buf.get() != '\n') { }
+            }
+        }
+    }
+
+    private static long readPdfInteger(ByteBuffer buf) {
+        if (!buf.hasRemaining()) {
+            throw new PDFParseException("Unexpected end of object stream index");
+        }
+        boolean negative = false;
+        byte b = buf.get(buf.position());
+        if (b == '-') {
+            negative = true;
+            buf.get();
+        } else if (b == '+') {
+            buf.get();
+        }
+        long value = 0;
+        while (buf.hasRemaining()) {
+            b = buf.get(buf.position());
+            if (b >= '0' && b <= '9') {
+                buf.get();
+                value = value * 10 + (b - '0');
+            } else if (b == '.') {
+                buf.get();
+                while (buf.hasRemaining()) {
+                    b = buf.get(buf.position());
+                    if (b >= '0' && b <= '9') {
+                        buf.get();
+                    } else {
+                        break;
+                    }
+                }
+                return negative ? -value : value;
+            } else {
+                break;
+            }
+        }
+        return negative ? -value : value;
+    }
+
+    /**
+     * Returns the object stream for the given stream ID, loading it if not cached.
+     */
+    private ObjectStream getOrLoadObjectStream(ObjectId streamId) throws IOException {
+        ObjectStream cached = objectStreamCache.get(streamId);
+        if (cached != null) {
+            return cached;
+        }
+        return loadObjectStream(streamId);
+    }
+
+    /**
+     * Loads an object stream from the file without emitting handler events.
+     * Decodes the stream (including FlateDecode etc.) and parses the index.
+     */
+    private ObjectStream loadObjectStream(ObjectId streamId) throws IOException {
+        CrossReferenceEntry entry = xref.get(streamId);
+        if (entry == null || !entry.isInUse()) {
+            throw new PDFParseException("Object stream not found: " + streamId);
+        }
+        
+        seek(entry.getOffset());
+        
+        readLong();
+        skipWhitespace();
+        readLong();
+        skipWhitespace();
+        if (!skipKeyword(OBJ)) {
+            throw new PDFParseException("Expected 'obj' in object stream " + streamId, getPosition());
+        }
+        skipWhitespace();
+        
+        xrefHandler.reset();
+        activeHandler = xrefHandler;
+        parseObject();
+        activeHandler = handler;
+        
+        Object capturedValue = xrefHandler.getResult();
+        if (!(capturedValue instanceof Map)) {
+            throw new PDFParseException("Object stream " + streamId + " has no dictionary", getPosition());
+        }
+        @SuppressWarnings("unchecked")
+        Map<Name, Object> streamDict = (Map<Name, Object>) capturedValue;
+        
+        skipWhitespace();
+        if (!skipKeyword(STREAM)) {
+            throw new PDFParseException("Expected 'stream' in object stream " + streamId, getPosition());
+        }
+        int b = readByte();
+        if (b == '\r' && peek() == '\n') {
+            readByte();
+        }
+        
+        Object lengthObj = streamDict.get(new Name("Length"));
+        int streamLength;
+        if (lengthObj instanceof Number) {
+            streamLength = ((Number) lengthObj).intValue();
+        } else if (lengthObj instanceof ObjectId) {
+            streamLength = resolveLength((ObjectId) lengthObj);
+        } else {
+            throw new PDFParseException("Object stream missing /Length");
+        }
+        
+        ByteBufferCollector collector = new ByteBufferCollector();
+        FilterPipeline pipeline = FilterPipeline.create(streamDict, collector);
+        if (streamLength > 0) {
+            int remaining = streamLength;
+            while (remaining > 0) {
+                int toRead = Math.min(BUFFER_SIZE, remaining);
+                byte[] chunk = readBytes(toRead);
+                pipeline.write(ByteBuffer.wrap(chunk));
+                remaining -= toRead;
+            }
+        }
+        pipeline.close();
+        
+        ByteBuffer decoded = collector.toByteBuffer();
+        Number nObj = (Number) streamDict.get(new Name("N"));
+        Number firstObj = (Number) streamDict.get(new Name("First"));
+        if (nObj == null || firstObj == null) {
+            throw new PDFParseException("Object stream missing /N or /First");
+        }
+        int n = nObj.intValue();
+        int first = firstObj.intValue();
+        int[] relativeOffsets = parseObjectStreamIndex(decoded, n, first);
+        ObjectStream objStream = new ObjectStream(streamId, decoded, first, relativeOffsets);
+        objectStreamCache.put(streamId, objStream);
+        return objStream;
+    }
+
+    /**
+     * Parses a single PDF object from in-memory data at the given offset and fires handler events.
+     * Temporarily switches the parser's input to the given buffer.
+     */
+    private void parseObjectFromBuffer(ByteBuffer data, int startOffset) throws IOException {
+        SeekableByteChannel savedChannel = channel;
+        long savedPosition = getPosition();
+        
+        ByteBuffer view = data.duplicate();
+        view.position(startOffset);
+        channel = new ByteBufferChannel(view);
+        buffer.clear();
+        bufferOffset = startOffset;
+        channel.position(startOffset);
+        int read = channel.read(buffer);
+        buffer.flip();
+        if (read > 0) {
+            bufferOffset = startOffset;
+        }
+        
+        try {
+            parseObject();
+        } finally {
+            channel = savedChannel;
+            seek(savedPosition);
+        }
+    }
+
     // ========================================================================
     // XRef loading - uses xrefHandler to build internal structures
     // ========================================================================
@@ -1015,22 +1377,36 @@ public class PDFParser {
             }
         }
         
-        Number lengthNum = (Number) streamDict.get(new Name("Length"));
-        if (lengthNum == null) {
+        Object lengthObj = streamDict.get(new Name("Length"));
+        int length;
+        if (lengthObj instanceof Number) {
+            length = ((Number) lengthObj).intValue();
+        } else if (lengthObj instanceof ObjectId) {
+            length = resolveLength((ObjectId) lengthObj);
+        } else {
             throw new PDFParseException("XRef stream missing Length");
         }
-        int length = lengthNum.intValue();
         
-        byte[] streamData = readBytes(length);
-        byte[] decodedData = decodeStream(streamData, streamDict);
-        
-        parseXrefStreamData(decodedData, streamDict);
+        ByteBufferCollector collector = new ByteBufferCollector();
+        FilterPipeline pipeline = FilterPipeline.create(streamDict, collector);
+        if (length > 0) {
+            int remaining = length;
+            while (remaining > 0) {
+                int toRead = Math.min(BUFFER_SIZE, remaining);
+                byte[] chunk = readBytes(toRead);
+                pipeline.write(ByteBuffer.wrap(chunk));
+                remaining -= toRead;
+            }
+        }
+        pipeline.close();
+        ByteBuffer decoded = collector.toByteBuffer();
+        parseXrefStreamData(decoded, streamDict);
     }
 
     /**
-     * Parses the binary data of an XRef stream.
+     * Parses the binary data of an XRef stream (decoded; may have been FlateDecode etc.).
      */
-    private void parseXrefStreamData(byte[] data, Map<Name, Object> dict) {
+    private void parseXrefStreamData(ByteBuffer data, Map<Name, Object> dict) {
         Object wValue = dict.get(new Name("W"));
         Object[] wArray;
         if (wValue instanceof Object[]) {
@@ -1056,26 +1432,23 @@ public class PDFParser {
             }
         } else {
             Number sizeNum = (Number) dict.get(new Name("Size"));
-            int size = sizeNum != null ? sizeNum.intValue() : data.length / entrySize;
+            int size = sizeNum != null ? sizeNum.intValue() : data.remaining() / entrySize;
             index = new int[] { 0, size };
         }
         
-        int dataOffset = 0;
         for (int i = 0; i < index.length; i += 2) {
             int startObj = index[i];
             int count = index[i + 1];
             
             for (int j = 0; j < count; j++) {
+                if (data.remaining() < entrySize) {
+                    throw new PDFParseException("XRef stream truncated");
+                }
                 int objNumEntry = startObj + j;
                 
-                int type = (w0 > 0) ? readIntFromBytes(data, dataOffset, w0) : 1;
-                dataOffset += w0;
-                
-                int field2 = readIntFromBytes(data, dataOffset, w1);
-                dataOffset += w1;
-                
-                int field3 = readIntFromBytes(data, dataOffset, w2);
-                dataOffset += w2;
+                int type = (w0 > 0) ? readIntFromBuffer(data, w0) : 1;
+                int field2 = readIntFromBuffer(data, w1);
+                int field3 = readIntFromBuffer(data, w2);
                 
                 CrossReferenceEntry entry;
                 switch (type) {
@@ -1101,27 +1474,18 @@ public class PDFParser {
     }
 
     /**
-     * Reads an integer from a byte array with the specified width.
+     * Reads an integer from the buffer with the specified byte width (big-endian).
+     * Advances the buffer position by width.
      */
-    private int readIntFromBytes(byte[] data, int offset, int width) {
+    private static int readIntFromBuffer(ByteBuffer buf, int width) {
+        if (width <= 0) {
+            return 0;
+        }
         int value = 0;
         for (int i = 0; i < width; i++) {
-            value = (value << 8) | (data[offset + i] & 0xFF);
+            value = (value << 8) | (buf.get() & 0xFF);
         }
         return value;
-    }
-
-    /**
-     * Decodes stream data by applying filters.
-     */
-    private byte[] decodeStream(byte[] data, Map<Name, Object> dict) {
-        Object filter = dict.get(new Name("Filter"));
-        if (filter == null) {
-            return data;
-        }
-        
-        // TODO: Implement filter decoding (FlateDecode, etc.)
-        return data;
     }
 
     // ========================================================================
@@ -1356,9 +1720,15 @@ public class PDFParser {
      * Returns the hex value of a character.
      */
     private int hexValue(int c) {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
         throw new PDFParseException("Invalid hex character: " + (char) c, getPosition());
     }
 
@@ -1413,6 +1783,24 @@ public class PDFParser {
     }
 
     /**
+     * Returns the CMap handler receiving ToUnicode/CMap parsing events.
+     *
+     * @return the CMap handler, or null if none is set
+     */
+    public CMapHandler getCMapHandler() {
+        return cmapHandler;
+    }
+
+    /**
+     * Sets the CMap handler to receive CMap parsing events (e.g. ToUnicode).
+     *
+     * @param cmapHandler the handler, or null to disable CMap parsing
+     */
+    public void setCMapHandler(CMapHandler cmapHandler) {
+        this.cmapHandler = cmapHandler;
+    }
+
+    /**
      * Creates a specialized stream parser for the given stream type.
      *
      * @param streamType the type of stream
@@ -1437,8 +1825,13 @@ public class PDFParser {
                 }
                 break;
                 
+            case CMAP:
+                if (cmapHandler != null) {
+                    return new CMapParser(cmapHandler);
+                }
+                break;
+                
             // TODO: Add other stream type parsers:
-            // case CMAP: return new CMapParser(...);
             // case METADATA: return new XMPParser(...);
             // case FONT_CFF: return new CFFParser(...);
             // case FONT_TYPE1: return new Type1Parser(...);
@@ -1487,6 +1880,7 @@ public class PDFParser {
             PDFParser parser = new PDFParser(new DebugPDFHandler());
             parser.setContentHandler(new DebugPDFContentHandler());
             parser.setOpenTypeHandler(new DebugOpenTypeHandler());
+            parser.setCMapHandler(new DebugCMapHandler());
             parser.parse(channel);
         } catch (IOException e) {
             System.err.println("Error parsing PDF: " + e.getMessage());

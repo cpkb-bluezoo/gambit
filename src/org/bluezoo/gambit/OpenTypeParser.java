@@ -223,7 +223,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseHeadTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("head");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -252,7 +254,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseMaxpTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("maxp");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -265,7 +269,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseHheaTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("hhea");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -294,7 +300,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseVheaTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("vhea");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -323,7 +331,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseOs2Table(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("OS/2");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -393,7 +403,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseNameTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("name");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         int tableStart = record.offset;
@@ -443,7 +455,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parsePostTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("post");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -475,7 +489,9 @@ public class OpenTypeParser implements StreamParser {
             List<String> extraNames = new ArrayList<>();
             while (buf.hasRemaining() && buf.position() < record.offset + record.length) {
                 int nameLength = buf.get() & 0xFF;
-                if (nameLength == 0 || buf.remaining() < nameLength) break;
+                if (nameLength == 0 || buf.remaining() < nameLength) {
+                    break;
+                }
                 byte[] nameBytes = new byte[nameLength];
                 buf.get(nameBytes);
                 extraNames.add(new String(nameBytes, StandardCharsets.US_ASCII));
@@ -497,7 +513,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseCmapTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("cmap");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         int tableStart = record.offset;
@@ -597,7 +615,9 @@ public class OpenTypeParser implements StreamParser {
 
         // Emit mappings
         for (int i = 0; i < segCount; i++) {
-            if (endCode[i] == 0xFFFF) continue; // Skip sentinel
+            if (endCode[i] == 0xFFFF) {
+                continue; // Skip sentinel
+            }
 
             for (int charCode = startCode[i]; charCode <= endCode[i]; charCode++) {
                 int glyphId;
@@ -657,7 +677,9 @@ public class OpenTypeParser implements StreamParser {
         TableRecord record = tablesByTag.get("hmtx");
         TableRecord hheaRecord = tablesByTag.get("hhea");
         TableRecord maxpRecord = tablesByTag.get("maxp");
-        if (record == null || hheaRecord == null || maxpRecord == null) return;
+        if (record == null || hheaRecord == null || maxpRecord == null) {
+            return;
+        }
         record.parsed = true;
 
         // We need numberOfHMetrics from hhea and numGlyphs from maxp
@@ -692,7 +714,9 @@ public class OpenTypeParser implements StreamParser {
         TableRecord record = tablesByTag.get("vmtx");
         TableRecord vheaRecord = tablesByTag.get("vhea");
         TableRecord maxpRecord = tablesByTag.get("maxp");
-        if (record == null || vheaRecord == null || maxpRecord == null) return;
+        if (record == null || vheaRecord == null || maxpRecord == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(vheaRecord.offset + 34);
@@ -723,7 +747,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseKernTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("kern");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -763,7 +789,9 @@ public class OpenTypeParser implements StreamParser {
         TableRecord record = tablesByTag.get("loca");
         TableRecord headRecord = tablesByTag.get("head");
         TableRecord maxpRecord = tablesByTag.get("maxp");
-        if (record == null || headRecord == null || maxpRecord == null) return;
+        if (record == null || headRecord == null || maxpRecord == null) {
+            return;
+        }
         record.parsed = true;
 
         // Get indexToLocFormat from head
@@ -790,7 +818,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseGlyfTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("glyf");
-        if (record == null || locaTable == null) return;
+        if (record == null || locaTable == null) {
+            return;
+        }
         record.parsed = true;
 
         int numGlyphs = locaTable.length - 1;
@@ -834,7 +864,9 @@ public class OpenTypeParser implements StreamParser {
     }
 
     private void parseSimpleGlyph(ByteBuffer buf, int numberOfContours) {
-        if (numberOfContours == 0) return;
+        if (numberOfContours == 0) {
+            return;
+        }
 
         int[] endPtsOfContours = new int[numberOfContours];
         for (int i = 0; i < numberOfContours; i++) {
@@ -939,7 +971,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseCFFTable(ByteBuffer buf) {
         TableRecord record = tablesByTag.get("CFF ");
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         buf.position(record.offset);
@@ -983,7 +1017,9 @@ public class OpenTypeParser implements StreamParser {
     private List<byte[]> parseIndex(ByteBuffer buf) {
         List<byte[]> result = new ArrayList<>();
         int count = buf.getShort() & 0xFFFF;
-        if (count == 0) return result;
+        if (count == 0) {
+            return result;
+        }
 
         int offSize = buf.get() & 0xFF;
         int[] offsets = new int[count + 1];
@@ -1076,7 +1112,9 @@ public class OpenTypeParser implements StreamParser {
 
     private void parseLayoutTable(ByteBuffer buf, String tableName) {
         TableRecord record = tablesByTag.get(tableName);
-        if (record == null) return;
+        if (record == null) {
+            return;
+        }
         record.parsed = true;
 
         int tableStart = record.offset;

@@ -74,8 +74,12 @@ final class ObjectReference {
 
     @Override
     public boolean equals(Object obj) {
-        if (this == obj) return true;
-        if (!(obj instanceof ObjectReference)) return false;
+        if (this == obj) {
+            return true;
+        }
+        if (!(obj instanceof ObjectReference)) {
+            return false;
+        }
         ObjectReference other = (ObjectReference) obj;
         return id.equals(other.id);
     }
