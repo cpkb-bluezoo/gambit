@@ -1,0 +1,1 @@
+java -cp build org.bluezoo.gambit.PDFParser $*

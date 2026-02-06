@@ -1,0 +1,132 @@
+<?xml version='1.0' standalone='yes'?>
+<!--
+  Copyright (C) 2025 Chris Burdess
+
+  This file is part of Gambit.
+
+  Gambit is free software; you can redistribute it and/or modify
+  it under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 3 of the License, or
+  (at your option) any later version.
+
+  Gambit is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public License
+  along with Gambit; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+-->
+<project name='gambit' default='dist'>
+
+  <property name='src' location='src'/>
+  <property name='build' location='build'/>
+  <property name='dist' location='dist'/>
+  <property name='test' location='test'/>
+  <property name='doc' location='doc'/>
+  
+  <!-- Gambit version -->
+  <property name='version' value='0.1.0'/>
+  <property name='gambit.jar' location='${dist}/gambit-${version}.jar'/>
+
+  <!-- Java version. We use Java 8 only -->
+  <property name='java.source.version' value='1.8'/>
+  <property name='java.target.version' value='1.8'/>
+  
+  <!-- JUnit dependencies -->
+  <property name='junit.jar' value='junit-4.13.1.jar'/>
+  <property name='hamcrest.jar' value='hamcrest-3.0.jar'/>
+
+  <!-- Clean build artifacts -->
+  <target name='clean' depends='clean-junit'>
+    <delete dir='${build}'/>
+    <delete dir='${dist}'/>
+    <delete dir='${doc}'/>
+  </target>
+  
+  <target name='clean-junit'>
+    <delete dir='${test}/junit/build'/>
+    <delete dir='${test}/junit/results'/>
+  </target>
+
+  <!-- Compile -->
+  <target name='build'>
+    <mkdir dir='${build}'/>
+    <javac srcdir='${src}' destdir='${build}' debug='true' includeantruntime='false'
+           source='${java.source.version}' target='${java.target.version}'>
+      <include name='**/*.java'/>
+    </javac>
+  </target>
+
+  <!-- Create JAR file -->
+  <target name='jar' depends='build'>
+    <mkdir dir='${dist}'/>
+    <jar destfile='${gambit.jar}' basedir='${build}'>
+      <manifest>
+        <attribute name='Implementation-Title' value='Gambit PDF Parser'/>
+        <attribute name='Implementation-Version' value='${version}'/>
+        <attribute name='Implementation-Vendor' value='Chris Burdess'/>
+      </manifest>
+    </jar>
+  </target>
+
+  <!-- API documentation -->
+  <target name='javadoc'>
+    <mkdir dir='${doc}'/>
+    <javadoc sourcepath='${src}' destdir='${doc}'
+             windowtitle='Gambit PDF Parser API'
+             doctitle='Gambit PDF Parser'
+             header='Gambit ${version}'>
+      <package name='org.bluezoo.gambit'/>
+      <package name='org.bluezoo.gambit.*'/>
+    </javadoc>
+  </target>
+
+  <!-- Distribution target -->
+  <target name='dist' depends='jar'/>
+  
+  <!-- JUnit test compilation -->
+  <target name='junit-build' depends='build'>
+    <mkdir dir='${test}/junit/build'/>
+    <javac srcdir='${test}/junit/src' destdir='${test}/junit/build' debug='true' includeantruntime='false'
+           source='${java.source.version}' target='${java.target.version}'>
+      <classpath>
+        <pathelement location='${build}'/>
+        <pathelement location='${test}/junit/lib/${junit.jar}'/>
+        <pathelement location='${test}/junit/lib/${hamcrest.jar}'/>
+      </classpath>
+    </javac>
+  </target>
+  
+  <!-- Run JUnit tests -->
+  <target name='junit-test' depends='junit-build'>
+    <mkdir dir='${test}/junit/results'/>
+    <junit printsummary='yes' haltonfailure='no' fork='yes' showoutput='true'>
+      <classpath>
+        <pathelement location='${build}'/>
+        <pathelement location='${test}/junit/build'/>
+        <pathelement location='${test}/junit/lib/${junit.jar}'/>
+        <pathelement location='${test}/junit/lib/${hamcrest.jar}'/>
+      </classpath>
+      <formatter type='xml'/>
+      <formatter type='plain' usefile='false'/>
+      <batchtest fork='yes' todir='${test}/junit/results'>
+        <fileset dir='${test}/junit/src'>
+          <include name='**/*Test.java'/>
+        </fileset>
+      </batchtest>
+    </junit>
+    
+    <!-- Display results summary -->
+    <echo message=''/>
+    <echo message='Test results written to ${test}/junit/results'/>
+  </target>
+  
+  <!-- Main test target -->
+  <target name='test' depends='junit-test' description='Run unit tests'>
+    <echo message='Unit tests complete'/>
+  </target>
+
+</project>
+
